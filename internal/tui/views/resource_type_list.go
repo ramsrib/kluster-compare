@@ -12,17 +12,18 @@ import (
 )
 
 type ResourceTypeListModel struct {
-	results   []model.ComparisonResult
-	filtered  []int // indices into results
-	cursor    int
-	offset    int
-	width     int
-	height    int
-	leftCtx   string
-	rightCtx  string
-	hideEmpty bool
-	searching bool
-	search    textinput.Model
+	results      []model.ComparisonResult
+	filtered     []int // indices into results
+	coreCount    int   // number of core (static) types — discovered types start after this
+	cursor       int
+	offset       int
+	width        int
+	height       int
+	leftCtx      string
+	rightCtx     string
+	hideEmpty    bool
+	searching    bool
+	search       textinput.Model
 }
 
 func NewResourceTypeListModel(results []model.ComparisonResult, width, height int, leftCtx, rightCtx string) ResourceTypeListModel {
@@ -33,6 +34,7 @@ func NewResourceTypeListModel(results []model.ComparisonResult, width, height in
 
 	m := ResourceTypeListModel{
 		results:   results,
+		coreCount: len(results),
 		cursor:    0,
 		width:     width,
 		height:    height,
@@ -48,22 +50,39 @@ func NewResourceTypeListModel(results []model.ComparisonResult, width, height in
 func (m *ResourceTypeListModel) applyFilter() {
 	query := strings.ToLower(m.search.Value())
 	m.filtered = m.filtered[:0]
-	for i, r := range m.results {
-		// Hide types still loading — they appear when done
-		if r.Loading {
-			continue
+
+	// Core types first (indices 0..coreCount-1)
+	for i := 0; i < m.coreCount && i < len(m.results); i++ {
+		if m.shouldShow(m.results[i], query) {
+			m.filtered = append(m.filtered, i)
 		}
-		if m.hideEmpty && r.LeftCount == 0 && r.RightCount == 0 && r.Error == "" {
-			continue
-		}
-		if query != "" && !strings.Contains(strings.ToLower(r.Type.Name), query) {
-			continue
-		}
-		m.filtered = append(m.filtered, i)
 	}
+
+	// Discovered types after (indices coreCount..)
+	if m.coreCount < len(m.results) {
+		for i := m.coreCount; i < len(m.results); i++ {
+			if m.shouldShow(m.results[i], query) {
+				m.filtered = append(m.filtered, i)
+			}
+		}
+	}
+
 	if m.cursor >= len(m.filtered) {
 		m.cursor = max(0, len(m.filtered)-1)
 	}
+}
+
+func (m *ResourceTypeListModel) shouldShow(r model.ComparisonResult, query string) bool {
+	if r.Loading {
+		return false
+	}
+	if m.hideEmpty && r.LeftCount == 0 && r.RightCount == 0 && r.Error == "" {
+		return false
+	}
+	if query != "" && !strings.Contains(strings.ToLower(r.Type.Name), query) {
+		return false
+	}
+	return true
 }
 
 // UpdateResult updates a single result in-place and reapplies the filter.
@@ -229,8 +248,19 @@ func (m ResourceTypeListModel) View() string {
 		end = len(m.filtered)
 	}
 
+	shownDiscoveredHeader := false
 	for vi := m.offset; vi < end; vi++ {
-		result := m.results[m.filtered[vi]]
+		idx := m.filtered[vi]
+
+		// Show separator when entering discovered section
+		if !shownDiscoveredHeader && idx >= m.coreCount && m.coreCount < len(m.results) {
+			shownDiscoveredHeader = true
+			sep := "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("── Discovered CRDs ──")
+			b.WriteString(sep)
+			b.WriteString("\n")
+		}
+
+		result := m.results[idx]
 		_, changed, onlyLeft, onlyRight := result.Counts()
 
 		line := fmt.Sprintf(fmtStr,
