@@ -3,6 +3,10 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -35,6 +39,8 @@ type fetchOneResultMsg struct {
 }
 
 type fetchAllDoneMsg struct{}
+
+type clearCopiedMsg struct{}
 
 type discoveryCompleteMsg struct {
 	newResults []model.ComparisonResult
@@ -69,6 +75,7 @@ type App struct {
 	ready         bool // true after first WindowSizeMsg
 	discovering   bool // true while CRD discovery is in progress
 	discovered    bool // true after discovery has been done
+	copiedMsg     string
 	err           error
 }
 
@@ -201,6 +208,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.discovering = true
 			return a, a.discoverCustomTypes()
 		}
+		// Copy CLI diff command to clipboard
+		if key.Matches(msg, key.NewBinding(key.WithKeys("c"))) && !isSearching {
+			var cmd string
+			switch a.activeView {
+			case viewResourceList:
+				cmd = a.cliDiffCmd()
+			case viewDiff:
+				cmd = a.cliDiffCmdForDiffView()
+			}
+			if cmd != "" {
+				if copyToClipboard(cmd) == nil {
+					a.copiedMsg = "Copied!"
+					return a, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+						return clearCopiedMsg{}
+					})
+				}
+			}
+		}
+
+	case clearCopiedMsg:
+		a.copiedMsg = ""
+		return a, nil
 
 	case discoveryCompleteMsg:
 		a.discovering = false
@@ -326,7 +355,9 @@ func (a App) View() string {
 		searchBar = a.resourceListView.SearchView()
 	}
 
-	// Reserve lines for bottom: status bar (1) + search bar (0 or 1)
+	help := a.helpText()
+	bar := StyleStatusBar.Width(a.width).Render(help)
+
 	bottomLines := 1
 	if searchBar != "" {
 		bottomLines = 2
@@ -339,14 +370,80 @@ func (a App) View() string {
 		lipgloss.NewStyle().Padding(0, 2).Render(inner),
 	)
 
-	// Bottom: optional search bar + status bar
-	help := a.helpText()
-	bar := StyleStatusBar.Width(a.width).Render(help)
-
 	if searchBar != "" {
 		return main + "\n" + searchBar + "\n" + bar
 	}
 	return main + "\n" + bar
+}
+
+func (a App) buildDiffCmd(pair *model.ResourcePair, typeName string) string {
+	if pair == nil {
+		return ""
+	}
+
+	var leftName, rightName, ns string
+	if pair.Left != nil {
+		leftName = pair.Left.Name
+		ns = pair.Left.Namespace
+	}
+	if pair.Right != nil {
+		rightName = pair.Right.Name
+		if ns == "" {
+			ns = pair.Right.Namespace
+		}
+	}
+	if leftName == "" {
+		leftName = rightName
+	}
+	if rightName == "" {
+		rightName = leftName
+	}
+
+	resArg := typeName + "/" + leftName
+	if leftName != rightName {
+		resArg = typeName + "/" + leftName + ":" + rightName
+	}
+
+	cmd := fmt.Sprintf("kluster-compare %s %s %s", a.leftContext, a.rightContext, resArg)
+	if ns != "" {
+		cmd += " -n " + ns
+	}
+	return cmd
+}
+
+func (a App) cliDiffCmd() string {
+	pair := a.resourceListView.SelectedPair()
+	if pair == nil || pair.Status == model.StatusEqual {
+		return ""
+	}
+	return a.buildDiffCmd(pair, a.resourceListView.TypeName())
+}
+
+func (a App) cliDiffCmdForDiffView() string {
+	pair := a.diffView.Pair()
+	return a.buildDiffCmd(&pair, a.diffView.TypeResource())
+}
+
+func (a App) formatCmdLine(cmd string) string {
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	if a.copiedMsg != "" {
+		return "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(a.copiedMsg) + " " + dimStyle.Render(cmd)
+	}
+	return "  " + dimStyle.Render("c: copy  "+cmd)
+}
+
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	default:
+		return fmt.Errorf("unsupported OS")
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 func (a App) helpText() string {
@@ -360,9 +457,21 @@ func (a App) helpText() string {
 		}
 		return help
 	case viewResourceList:
-		return " j/k: navigate  /: filter  enter: view diff  esc: back  q: quit"
+		help := " j/k: navigate  /: filter  enter: view diff  esc: back  q: quit"
+		if a.copiedMsg != "" {
+			help += "  Copied!"
+		} else {
+			help += "  c: copy cmd"
+		}
+		return help
 	case viewDiff:
-		return " j/k: scroll  esc: back  q: quit"
+		help := " j/k: scroll  esc: back  q: quit"
+		if a.copiedMsg != "" {
+			help += "  Copied!"
+		} else {
+			help += "  c: copy cmd"
+		}
+		return help
 	default:
 		return ""
 	}

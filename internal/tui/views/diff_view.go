@@ -25,6 +25,14 @@ type DiffViewModel struct {
 
 type DiffViewBackMsg struct{}
 
+func (m DiffViewModel) Pair() model.ResourcePair {
+	return m.pair
+}
+
+func (m DiffViewModel) TypeResource() string {
+	return m.resType.Resource
+}
+
 func NewDiffViewModel(pair model.ResourcePair, resType model.ResourceType, width, height int, leftCtx, rightCtx string) DiffViewModel {
 	m := DiffViewModel{
 		pair:     pair,

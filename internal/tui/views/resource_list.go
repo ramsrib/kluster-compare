@@ -61,6 +61,19 @@ func (m ResourceListModel) IsSearching() bool {
 	return m.searching
 }
 
+// SelectedPair returns the currently highlighted pair, or nil.
+func (m ResourceListModel) SelectedPair() *model.ResourcePair {
+	if m.cursor >= 0 && m.cursor < len(m.filtered) {
+		return &m.result.Pairs[m.filtered[m.cursor]]
+	}
+	return nil
+}
+
+// TypeName returns the resource type name for this list.
+func (m ResourceListModel) TypeName() string {
+	return m.result.Type.Resource
+}
+
 func (m ResourceListModel) SearchView() string {
 	if !m.searching {
 		return ""
