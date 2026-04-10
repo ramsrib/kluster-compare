@@ -41,7 +41,9 @@ Modes:
   Specific resource diff (kubectl-style):
     kluster-compare ctx-a ctx-b deployment/api-server -n app-namespace
     kluster-compare ctx-a ctx-b namespace/kube-system
-    kluster-compare ctx-a ctx-b service/my-svc -n default
+
+  Diff resources with different names (left:right):
+    kluster-compare ctx-a ctx-b hpa/daily-proxy-hpa-a75e5255:daily-proxy-hpa -n app-namespace
 
   Filter by types or namespaces:
     kluster-compare ctx-a ctx-b -t deployments,services -n app-namespace`,
@@ -64,22 +66,31 @@ Modes:
 		}
 
 		registry := model.DefaultRegistry()
+
+		// If -t includes types not in the static registry, auto-discover
+		needsDiscovery := discoverTypes
+		if len(resourceTypes) > 0 {
+			filtered := registry.Filter(resourceTypes)
+			if len(filtered.All()) < len(resourceTypes) {
+				needsDiscovery = true
+			}
+		}
+
+		if needsDiscovery {
+			fmt.Fprintln(os.Stderr, "Discovering resource types...")
+			discovered, err := kube.DiscoverResourceTypes(kubeconfig, ctxA, ctxB)
+			if err == nil {
+				// Merge: discovered types + static (static wins on duplicates)
+				registry = mergeRegistries(registry, discovered)
+			}
+		}
+
 		if len(resourceTypes) > 0 {
 			registry = registry.Filter(resourceTypes)
 		}
 
 		// Non-interactive summary
 		if summaryFlag {
-			if discoverTypes {
-				fmt.Fprintln(os.Stderr, "Discovering resource types...")
-				discovered, err := kube.DiscoverResourceTypes(kubeconfig, ctxA, ctxB)
-				if err == nil {
-					registry = discovered
-				}
-				if len(resourceTypes) > 0 {
-					registry = registry.Filter(resourceTypes)
-				}
-			}
 			return runSummary(ctxA, ctxB, clientA, clientB, registry)
 		}
 
@@ -120,7 +131,7 @@ func homeDir() string {
 // --- Specific resource diff ---
 
 func runDiff(ctxA, ctxB, resourceArg string, clientA, clientB dynamic.Interface) error {
-	typeName, resName, err := parseResourceArg(resourceArg)
+	typeName, leftName, rightName, err := parseResourceArg(resourceArg)
 	if err != nil {
 		return err
 	}
@@ -152,12 +163,15 @@ func runDiff(ctxA, ctxB, resourceArg string, clientA, clientB dynamic.Interface)
 	leftResources, errL := fetcher.Fetch(ctx, clientA, ns)
 	rightResources, errR := fetcher.Fetch(ctx, clientB, ns)
 
-	left := findByName(leftResources, resName)
-	right := findByName(rightResources, resName)
+	left := findByName(leftResources, leftName)
+	right := findByName(rightResources, rightName)
 
-	key := resName
+	key := leftName
+	if leftName != rightName {
+		key = leftName + " : " + rightName
+	}
 	if namespace != "" {
-		key = namespace + "/" + resName
+		key = namespace + "/" + key
 	}
 
 	if left == nil && right == nil {
@@ -267,13 +281,21 @@ func runSummary(ctxA, ctxB string, clientA, clientB dynamic.Interface, registry 
 
 // --- Helpers ---
 
-// parseResourceArg parses "type/name" into (type, name).
-func parseResourceArg(arg string) (string, string, error) {
+// parseResourceArg parses "type/name" or "type/leftName:rightName" into components.
+func parseResourceArg(arg string) (typeName, leftName, rightName string, err error) {
 	parts := strings.SplitN(arg, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("resource must be in type/name format (e.g. deployment/api-server), got %q", arg)
+		return "", "", "", fmt.Errorf("resource must be in type/name or type/left:right format (e.g. deployment/api-server), got %q", arg)
 	}
-	return parts[0], parts[1], nil
+	typeName = parts[0]
+	names := strings.SplitN(parts[1], ":", 2)
+	leftName = names[0]
+	if len(names) == 2 {
+		rightName = names[1]
+	} else {
+		rightName = leftName
+	}
+	return typeName, leftName, rightName, nil
 }
 
 // resolveResourceType finds a ResourceType by name, plural, or singular (case-insensitive).
@@ -312,6 +334,24 @@ func splitNamespaces(ns string) []string {
 		}
 	}
 	return result
+}
+
+func mergeRegistries(static, discovered *model.Registry) *model.Registry {
+	seen := make(map[string]bool)
+	merged := &model.Registry{}
+	// Static types first (they have nicer names like "HPA" vs "horizontalpodautoscalers")
+	for _, rt := range static.All() {
+		key := rt.Group + "/" + rt.Version + "/" + rt.Resource
+		seen[key] = true
+		merged.Register(rt)
+	}
+	for _, rt := range discovered.All() {
+		key := rt.Group + "/" + rt.Version + "/" + rt.Resource
+		if !seen[key] {
+			merged.Register(rt)
+		}
+	}
+	return merged
 }
 
 func printColorDiff(d string) {

@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 
 	"k8s.io/client-go/dynamic"
@@ -151,51 +152,116 @@ func compareResourceType(
 		rightMap[r.Key()] = r
 	}
 
-	// Collect all keys
-	allKeys := make(map[string]bool)
-	for k := range leftMap {
-		allKeys[k] = true
-	}
-	for k := range rightMap {
-		allKeys[k] = true
-	}
+	// Pass 1: exact match
+	matchedLeft := make(map[string]bool)
+	matchedRight := make(map[string]bool)
 
-	sortedKeys := make([]string, 0, len(allKeys))
-	for k := range allKeys {
-		sortedKeys = append(sortedKeys, k)
-	}
-	sort.Strings(sortedKeys)
-
-	for _, key := range sortedKeys {
-		left, inLeft := leftMap[key]
-		right, inRight := rightMap[key]
-
-		pair := model.ResourcePair{Key: key}
-
-		switch {
-		case inLeft && !inRight:
-			pair.Left = &left
-			pair.Status = model.StatusOnlyInLeft
-		case !inLeft && inRight:
-			pair.Right = &right
-			pair.Status = model.StatusOnlyInRight
-		default:
-			pair.Left = &left
-			pair.Right = &right
-			diffText := diff.Compute(
-				"left/"+key, "right/"+key,
-				left.Normalized, right.Normalized,
-			)
-			if diffText == "" {
-				pair.Status = model.StatusEqual
-			} else {
-				pair.Status = model.StatusChanged
-				pair.DiffText = diffText
-			}
+	// Collect exact matches first
+	for key, left := range leftMap {
+		if right, ok := rightMap[key]; ok {
+			matchedLeft[key] = true
+			matchedRight[key] = true
+			pair := makePair(key, &left, &right)
+			result.Pairs = append(result.Pairs, pair)
 		}
-
-		result.Pairs = append(result.Pairs, pair)
 	}
+
+	// Pass 2: fuzzy match unmatched resources by canonical name
+	// Group unmatched left/right by canonical key (namespace + canonical name)
+	type canonEntry struct {
+		key      string
+		resource model.Resource
+	}
+	leftCanon := make(map[string][]canonEntry)
+	for key, r := range leftMap {
+		if matchedLeft[key] {
+			continue
+		}
+		ck := canonicalKey(r)
+		leftCanon[ck] = append(leftCanon[ck], canonEntry{key, r})
+	}
+	rightCanon := make(map[string][]canonEntry)
+	for key, r := range rightMap {
+		if matchedRight[key] {
+			continue
+		}
+		ck := canonicalKey(r)
+		rightCanon[ck] = append(rightCanon[ck], canonEntry{key, r})
+	}
+
+	// Pair fuzzy matches
+	for ck, leftEntries := range leftCanon {
+		rightEntries := rightCanon[ck]
+		i := 0
+		for ; i < len(leftEntries) && i < len(rightEntries); i++ {
+			l := leftEntries[i]
+			r := rightEntries[i]
+			displayKey := l.key + " ~ " + nameFromKey(r.key)
+			pair := makePair(displayKey, &l.resource, &r.resource)
+			result.Pairs = append(result.Pairs, pair)
+		}
+		// Remaining unmatched left
+		for ; i < len(leftEntries); i++ {
+			l := leftEntries[i]
+			result.Pairs = append(result.Pairs, model.ResourcePair{
+				Key: l.key, Left: &l.resource, Status: model.StatusOnlyInLeft,
+			})
+		}
+		// Remaining unmatched right (if left had fewer)
+		for ; i < len(rightEntries); i++ {
+			r := rightEntries[i]
+			result.Pairs = append(result.Pairs, model.ResourcePair{
+				Key: r.key, Right: &r.resource, Status: model.StatusOnlyInRight,
+			})
+		}
+		delete(rightCanon, ck)
+	}
+
+	// Remaining right-only (no fuzzy match at all)
+	for _, rightEntries := range rightCanon {
+		for _, r := range rightEntries {
+			result.Pairs = append(result.Pairs, model.ResourcePair{
+				Key: r.key, Right: &r.resource, Status: model.StatusOnlyInRight,
+			})
+		}
+	}
+
+	// Sort pairs for stable output
+	sort.Slice(result.Pairs, func(i, j int) bool {
+		return result.Pairs[i].Key < result.Pairs[j].Key
+	})
 
 	return result
+}
+
+func makePair(key string, left, right *model.Resource) model.ResourcePair {
+	pair := model.ResourcePair{Key: key, Left: left, Right: right}
+	diffText := diff.Compute(
+		"left/"+key, "right/"+key,
+		left.Normalized, right.Normalized,
+	)
+	if diffText == "" {
+		pair.Status = model.StatusEqual
+	} else {
+		pair.Status = model.StatusChanged
+		pair.DiffText = diffText
+	}
+	return pair
+}
+
+// canonicalKey returns a matching key with hex hashes stripped.
+func canonicalKey(r model.Resource) string {
+	cn := canonicalName(r.Name)
+	if r.Namespace == "" {
+		return cn
+	}
+	return r.Namespace + "/" + cn
+}
+
+// nameFromKey extracts just the name part from a "namespace/name" key.
+func nameFromKey(key string) string {
+	if i := strings.LastIndex(key, "/"); i >= 0 {
+		return key[i+1:]
+	}
+	return key
 }

@@ -33,6 +33,9 @@ kluster-compare ctx-a ctx-b -s
 kluster-compare ctx-a ctx-b deployment/api-deployment -n app-namespace
 kluster-compare ctx-a ctx-b namespace/kube-system
 
+# Diff resources with different names on each cluster (left:right)
+kluster-compare ctx-a ctx-b hpa/daily-proxy-hpa-a75e5255:daily-proxy-hpa -n app-namespace
+
 # Filter by types or namespaces
 kluster-compare ctx-a ctx-b -t deployments,services -n app-namespace
 
@@ -114,9 +117,11 @@ No other code changes needed -- the dynamic client handles everything.
 
 - Connects to both clusters using kubeconfig contexts
 - Fetches resources progressively in parallel via the Kubernetes dynamic client
+- Matches resources by exact name first, then fuzzy-matches by stripping hex hash suffixes (e.g. `app-19e0eebb-backplane` and `app-23b5ac0a-backplane` are paired automatically)
 - Normalizes resources by stripping runtime fields (status, uid, managedFields, etc.) and migration annotations (pulumi.com/\*, argocd.argoproj.io/\*)
 - Computes unified diffs on the normalized YAML
 - Presents results in an interactive TUI with side-by-side diff or prints to stdout
+- For CLI diff mode, use `type/left:right` to compare resources with different names
 
 ## Local development
 
